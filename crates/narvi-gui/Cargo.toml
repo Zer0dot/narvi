@@ -1,0 +1,22 @@
+[package]
+name = "narvi-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Narvi GUI: egui dashboard with live preview (Saturn theme)."
+
+[[bin]]
+name = "narvi-gui"
+path = "src/main.rs"
+
+[dependencies]
+narvi-core = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_extras = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

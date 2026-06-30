@@ -1,0 +1,25 @@
+[package]
+name = "narvid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Narvi daemon: owns state, generates/hot-reloads the shader, scheduling, auto-switch."
+
+[[bin]]
+name = "narvid"
+path = "src/main.rs"
+
+[dependencies]
+narvi-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+globset = { workspace = true }
+notify = { workspace = true }
+sunrise = { workspace = true }
+chrono = { workspace = true }
+directories = { workspace = true }
