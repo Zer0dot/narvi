@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/narvi-core",
+    "crates/narvid",
+    "crates/narvi",
+    "crates/narvi-gui",
+    "crates/narvi-tray",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/zer0dot/narvi"
+authors = ["zer0dot <zer0dot.dev@gmail.com>"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+narvi-core = { path = "crates/narvi-core" }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# errors
+anyhow = "1"
+thiserror = "2"
+
+# daemon
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# gui + tray
+eframe = "0.31"
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+ksni = "0.3"
+
+# integration
+globset = "0.4"
+notify = "8"
+sunrise = "1"
+chrono = "0.4"
+directories = "5"
+
+[profile.release]
+lto = "thin"
+strip = true

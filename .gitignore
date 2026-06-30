@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Nix
+result
+result-*
+.direnv/
+
+# editor
+.idea/
+.vscode/
+*.swp
