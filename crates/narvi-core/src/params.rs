@@ -17,13 +17,38 @@ pub mod range {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ColorParams {
+    #[serde(serialize_with = "ser_f32")]
     pub vibrance: f32,
+    #[serde(serialize_with = "ser_f32")]
     pub saturation: f32,
     pub temperature: u32,
+    #[serde(serialize_with = "ser_f32")]
     pub brightness: f32,
+    #[serde(serialize_with = "ser_f32")]
     pub contrast: f32,
+    #[serde(serialize_with = "ser_f32")]
     pub gamma: f32,
+    #[serde(serialize_with = "ser_rgb")]
     pub rgb: [f32; 3],
+}
+
+/// f32 → f64 via the shortest decimal repr, so JSON/TOML show `1.3`,
+/// not `1.2999999523162842` (serde converts f32 through `as f64`).
+fn clean(v: f32) -> f64 {
+    v.to_string().parse().unwrap_or(v as f64)
+}
+
+fn ser_f32<S: serde::Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(clean(*v))
+}
+
+fn ser_rgb<S: serde::Serializer>(v: &[f32; 3], s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(3))?;
+    for c in v {
+        seq.serialize_element(&clean(*c))?;
+    }
+    seq.end()
 }
 
 impl Default for ColorParams {

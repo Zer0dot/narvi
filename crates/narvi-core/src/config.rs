@@ -1,9 +1,10 @@
 //! `~/.config/narvi/config.toml` schema + load/save. See PROTOCOL.md / SPEC.md.
 //!
 //! Validation policy: unknown keys → warn + ignore; out-of-range → clamp + warn;
-//! missing `active_profile` → first profile or neutral. Load/save land in M2.
+//! missing `active_profile` → first profile or neutral.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,8 @@ impl Default for Ui {
     }
 }
 
+const KNOWN_KEYS: [&str; 5] = ["general", "hyprland", "scheduling", "ui", "profiles"];
+
 impl Config {
     /// Default config path: `$XDG_CONFIG_HOME/narvi/config.toml`.
     pub fn default_path() -> Result<PathBuf> {
@@ -117,13 +120,96 @@ impl Config {
         Ok(dirs.config_dir().join("config.toml"))
     }
 
-    /// Load + validate from `path` (clamp out-of-range, warn on unknown). M2.
-    pub fn load(_path: &std::path::Path) -> Result<Self> {
-        todo!("M2: read TOML, clamp params, warn on unknown keys")
+    /// Load + validate: warn on unknown top-level keys, clamp out-of-range params.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let table: toml::Table = text.parse()?;
+        for key in table.keys() {
+            if !KNOWN_KEYS.contains(&key.as_str()) {
+                log::warn!("config: unknown key `{key}` ignored");
+            }
+        }
+        let mut cfg: Config = table.try_into()?;
+        for p in &mut cfg.profiles {
+            let clamped = p.params.clamped();
+            if clamped != p.params {
+                log::warn!(
+                    "config: profile `{}` had out-of-range params; clamped",
+                    p.name
+                );
+                p.params = clamped;
+            }
+        }
+        Ok(cfg)
     }
 
-    /// Persist to `path` atomically. M2.
-    pub fn save(&self, _path: &std::path::Path) -> Result<()> {
-        todo!("M2: atomic TOML write")
+    /// Persist atomically: write `.tmp`, fsync, rename over `path`.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Find a profile by name, case-insensitively.
+    pub fn profile(&self, name: &str) -> Option<&Profile> {
+        self.profiles
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+    }
+}
+
+/// Expand a leading `~/` to `$HOME`. Paths in config are user-written.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_and_clamp() {
+        let dir = std::env::temp_dir().join("narvi-core-test-config");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.profiles
+            .push(Profile::new("default", Default::default()));
+        cfg.save(&path).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.general.active_profile, "default");
+        assert_eq!(loaded.profiles.len(), 1);
+
+        // Out-of-range values in the file clamp on load.
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("vibrance = 1.0", "vibrance = 9.0");
+        std::fs::write(&path, text).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.profiles[0].params.vibrance, 2.0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn profile_lookup_is_case_insensitive() {
+        let mut cfg = Config::default();
+        cfg.profiles
+            .push(Profile::new("Gaming", Default::default()));
+        assert!(cfg.profile("gaming").is_some());
+        assert!(cfg.profile("nope").is_none());
     }
 }
