@@ -1,8 +1,11 @@
 //! `narvid` — the Narvi daemon. Single source of truth for color state.
 
 mod apply;
+mod hypr;
+mod sched;
 mod server;
 mod state;
+mod watch;
 
 use std::sync::Arc;
 
@@ -48,7 +51,11 @@ async fn main() -> Result<()> {
     let sock = narvi_core::socket_path()?;
     let listener = server::bind(&sock).await?;
     log::info!("listening on {}", sock.display());
+    let cfg_path = daemon.cfg_path.clone();
     let daemon = Arc::new(Mutex::new(daemon));
+    sched::spawn(daemon.clone());
+    hypr::spawn(daemon.clone());
+    watch::spawn(daemon.clone(), cfg_path);
 
     tokio::select! {
         _ = server::serve(listener, daemon.clone()) => {}

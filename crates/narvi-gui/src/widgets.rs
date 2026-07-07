@@ -82,7 +82,7 @@ fn track(
 
 /// Primary: filled accent with navy text. Secondary: outlined pill, accent text.
 pub fn button(ui: &mut egui::Ui, label: &str, accent: Color32, primary: bool) -> egui::Response {
-    let text = egui::RichText::new(theme::tracked(label)).size(11.0);
+    let text = egui::RichText::new(theme::tracked(label)).size(13.0);
     let b = if primary {
         egui::Button::new(text.color(theme::BG).strong()).fill(accent)
     } else {

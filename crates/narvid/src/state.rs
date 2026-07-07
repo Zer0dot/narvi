@@ -32,6 +32,8 @@ pub struct Daemon {
     pub manual_profile: Option<String>,
     /// Class that triggered the current profile via auto-switch, if any.
     pub auto_class: Option<String>,
+    /// State to restore when focus leaves all `match`ed windows.
+    pub revert: Option<(ColorParams, Option<String>)>,
     /// Scheduling sub-state, maintained by the scheduler task.
     pub schedule: ScheduleStatus,
     pub tx: broadcast::Sender<Event>,
@@ -53,6 +55,7 @@ impl Daemon {
             active_profile: None,
             manual_profile: None,
             auto_class: None,
+            revert: None,
             schedule: ScheduleStatus {
                 mode,
                 next_transition_secs: None,
@@ -101,6 +104,7 @@ impl Daemon {
         self.active_profile = Some(canonical.clone());
         if auto.is_none() {
             self.manual_profile = Some(canonical);
+            self.revert = None; // manual choice cancels any pending auto-revert
         }
         self.auto_class = auto;
         Ok(())

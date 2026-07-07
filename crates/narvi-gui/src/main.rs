@@ -167,8 +167,8 @@ impl App {
         widgets::bracket_panel(ui, a, |ui| {
             ui.label(
                 egui::RichText::new(theme::tracked("Live Preview"))
-                    .size(10.5)
-                    .color(theme::TEXT_DIM),
+                    .size(13.0)
+                    .color(theme::TEXT_MUTED),
             );
             ui.add_space(4.0);
             let tex = self.preview.texture(ctx, &self.params);
@@ -182,7 +182,7 @@ impl App {
             .clone()
             .unwrap_or_else(|| "unsaved".into());
         egui::ComboBox::from_id_salt("profile")
-            .selected_text(theme::tracked(&sel))
+            .selected_text(egui::RichText::new(theme::tracked(&sel)).size(13.0))
             .width(200.0)
             .show_ui(ui, |ui| {
                 let names = self.profiles.clone();
@@ -247,7 +247,7 @@ impl eframe::App for App {
                     );
                     ui.label(
                         egui::RichText::new(theme::tracked("// color control"))
-                            .size(10.5)
+                            .size(13.0)
                             .color(theme::TEXT_MUTED),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

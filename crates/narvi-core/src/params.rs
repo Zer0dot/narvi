@@ -137,6 +137,26 @@ impl ColorParams {
         self.set(param, self.get(param) + delta);
     }
 
+    /// Linear blend between two param sets (`t` in 0..1), for day/night transitions.
+    pub fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let f = |x: f32, y: f32| x + (y - x) * t;
+        Self {
+            vibrance: f(a.vibrance, b.vibrance),
+            saturation: f(a.saturation, b.saturation),
+            temperature: f(a.temperature as f32, b.temperature as f32).round() as u32,
+            brightness: f(a.brightness, b.brightness),
+            contrast: f(a.contrast, b.contrast),
+            gamma: f(a.gamma, b.gamma),
+            rgb: [
+                f(a.rgb[0], b.rgb[0]),
+                f(a.rgb[1], b.rgb[1]),
+                f(a.rgb[2], b.rgb[2]),
+            ],
+        }
+        .clamped()
+    }
+
     /// Clamp every field back into range (e.g. after loading untrusted config).
     pub fn clamped(mut self) -> Self {
         self.vibrance = clamp(self.vibrance, range::VIBRANCE);
@@ -181,6 +201,21 @@ mod tests {
         assert!((p.vibrance - 1.05).abs() < 1e-6);
         p.nudge(Param::Gamma, 10.0);
         assert_eq!(p.gamma, 2.0);
+    }
+
+    #[test]
+    fn lerp_blends_and_hits_endpoints() {
+        let day = ColorParams::default();
+        let night = ColorParams {
+            temperature: 3500,
+            brightness: 0.9,
+            ..Default::default()
+        };
+        assert_eq!(ColorParams::lerp(&day, &night, 0.0), day);
+        assert_eq!(ColorParams::lerp(&day, &night, 1.0), night);
+        let mid = ColorParams::lerp(&day, &night, 0.5);
+        assert_eq!(mid.temperature, 5000);
+        assert!((mid.brightness - 0.95).abs() < 1e-6);
     }
 
     #[test]
