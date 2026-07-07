@@ -24,8 +24,10 @@ async fn main() -> Result<()> {
     let cfg = if cfg_path.exists() {
         Config::load(&cfg_path).with_context(|| format!("load {}", cfg_path.display()))?
     } else {
-        let mut cfg = Config::default();
-        cfg.profiles = narvi_core::profile::builtin_presets();
+        let cfg = Config {
+            profiles: narvi_core::profile::builtin_presets(),
+            ..Default::default()
+        };
         cfg.save(&cfg_path)
             .with_context(|| format!("seed {}", cfg_path.display()))?;
         log::info!("seeded default config at {}", cfg_path.display());
