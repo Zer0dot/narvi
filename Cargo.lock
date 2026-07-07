@@ -2187,10 +2187,13 @@ name = "narvi-tray"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "env_logger",
  "ksni",
+ "log",
  "narvi-core",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
