@@ -39,9 +39,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 clap = { version = "4", features = ["derive"] }
 
 # gui + tray
-eframe = "0.31"
+# wgpu backend: the glow/EGL path is unreliable on NVIDIA + Wayland.
+eframe = { version = "0.31", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
 egui = "0.31"
-egui_extras = { version = "0.31", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ksni = "0.3"
 
 # integration

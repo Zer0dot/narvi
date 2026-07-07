@@ -9,6 +9,7 @@ pub mod config;
 pub mod error;
 pub mod kelvin;
 pub mod params;
+pub mod pipeline;
 pub mod profile;
 pub mod proto;
 pub mod shader;

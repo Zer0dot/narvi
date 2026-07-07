@@ -23,6 +23,8 @@ pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
+    /// Events read while waiting for a response; drained by [`next_event`].
+    pending: std::collections::VecDeque<Event>,
 }
 
 impl Client {
@@ -33,41 +35,51 @@ impl Client {
             reader: BufReader::new(stream),
             writer,
             next_id: 1,
+            pending: Default::default(),
         })
     }
 
+    fn read_line(&mut self) -> Result<String> {
+        let mut buf = String::new();
+        if self.reader.read_line(&mut buf)? == 0 {
+            return Err(Error::Daemon("connection closed by daemon".into()));
+        }
+        Ok(buf)
+    }
+
     /// Send one command, return its `data` payload (`Error::Daemon` on `ok:false`).
+    /// Event lines arriving in between are queued for [`next_event`].
     pub fn request(&mut self, command: Command) -> Result<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
         let mut line = serde_json::to_vec(&Request { id, command })?;
         line.push(b'\n');
         self.writer.write_all(&line)?;
-        // Skip any interleaved event lines (possible after `subscribe`).
         loop {
-            let mut buf = String::new();
-            if self.reader.read_line(&mut buf)? == 0 {
-                return Err(Error::Daemon("connection closed by daemon".into()));
-            }
-            if let Ok(resp) = serde_json::from_str::<Response>(&buf)
-                && resp.id == id
-            {
+            let buf = self.read_line()?;
+            if let Ok(resp) = serde_json::from_str::<Response>(&buf) {
+                if resp.id != id {
+                    continue;
+                }
                 return match (resp.ok, resp.data, resp.error) {
                     (true, Some(data), _) => Ok(data),
                     (true, None, _) => Ok(serde_json::Value::Null),
                     (_, _, err) => Err(Error::Daemon(err.unwrap_or_else(|| "unknown".into()))),
                 };
             }
+            if let Ok(ev) = serde_json::from_str::<Event>(&buf) {
+                self.pending.push_back(ev);
+            }
         }
     }
 
     /// Block until the next pushed event (call after a `subscribe` request).
     pub fn next_event(&mut self) -> Result<Event> {
+        if let Some(ev) = self.pending.pop_front() {
+            return Ok(ev);
+        }
         loop {
-            let mut buf = String::new();
-            if self.reader.read_line(&mut buf)? == 0 {
-                return Err(Error::Daemon("connection closed by daemon".into()));
-            }
+            let buf = self.read_line()?;
             if let Ok(ev) = serde_json::from_str::<Event>(&buf) {
                 return Ok(ev);
             }
