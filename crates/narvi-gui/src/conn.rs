@@ -111,18 +111,14 @@ fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
             }
         }
 
-        loop {
-            match client.next_event() {
-                Ok(ev) => {
-                    // Profile set may have changed (save/delete); refresh the names.
-                    let names = client
-                        .request(Command::ProfileList)
-                        .ok()
-                        .and_then(|v| serde_json::from_value(v).ok());
-                    update(&shared, ev.data, names);
-                }
-                Err(_) => break, // reconnect
-            }
+        // On stream error, fall through and reconnect.
+        while let Ok(ev) = client.next_event() {
+            // Profile set may have changed (save/delete); refresh the names.
+            let names = client
+                .request(Command::ProfileList)
+                .ok()
+                .and_then(|v| serde_json::from_value(v).ok());
+            update(&shared, ev.data, names);
         }
     }
 }

@@ -30,8 +30,8 @@ pub fn apply_pipeline(p: &ColorParams, rgb: [f32; 3]) -> [f32; 3] {
     }
 
     let luma = dot(c, LUMA);
-    for i in 0..3 {
-        c[i] = luma + (c[i] - luma) * p.saturation;
+    for ch in &mut c {
+        *ch = luma + (*ch - luma) * p.saturation;
     }
 
     // Protective vibrance: boost muted colors, spare saturated + skin (red-dominant).
@@ -42,9 +42,8 @@ pub fn apply_pipeline(p: &ColorParams, rgb: [f32; 3]) -> [f32; 3] {
     let mut boost = (p.vibrance - 1.0) * (1.0 - smoothstep(0.0, 1.0, sat));
     let red_dominant = c[1].max(c[2]) <= c[0];
     boost *= if red_dominant { 0.5 } else { 1.0 };
-    for i in 0..3 {
-        c[i] = luma + (c[i] - luma) * (1.0 + boost);
-        c[i] = c[i].clamp(0.0, 1.0);
+    for ch in &mut c {
+        *ch = (luma + (*ch - luma) * (1.0 + boost)).clamp(0.0, 1.0);
     }
     c
 }

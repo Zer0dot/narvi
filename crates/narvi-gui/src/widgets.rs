@@ -17,11 +17,11 @@ pub fn line_slider(
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.add_sized(
-            [92.0, 18.0],
+            [118.0, 22.0],
             egui::Label::new(
                 egui::RichText::new(theme::tracked(label))
-                    .size(10.5)
-                    .color(theme::TEXT_DIM),
+                    .size(13.0)
+                    .color(theme::TEXT_MUTED),
             ),
         );
 
@@ -33,7 +33,7 @@ pub fn line_slider(
                 .range(range.clone())
                 .min_decimals(decimals)
                 .max_decimals(decimals);
-            changed |= ui.add_sized([56.0, 18.0], field).changed();
+            changed |= ui.add_sized([64.0, 22.0], field).changed();
             changed |= track(ui, value, range, accent);
         });
     });
