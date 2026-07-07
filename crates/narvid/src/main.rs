@@ -2,7 +2,6 @@
 
 mod apply;
 mod server;
-mod socket;
 mod state;
 
 use std::sync::Arc;
@@ -46,7 +45,7 @@ async fn main() -> Result<()> {
         daemon.enabled
     );
 
-    let sock = socket::socket_path()?;
+    let sock = narvi_core::socket_path()?;
     let listener = server::bind(&sock).await?;
     log::info!("listening on {}", sock.display());
     let daemon = Arc::new(Mutex::new(daemon));

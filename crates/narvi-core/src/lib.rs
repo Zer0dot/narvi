@@ -4,6 +4,7 @@
 //! socket protocol. The daemon and all clients depend on these types and never duplicate
 //! param logic. M0 freezes the public API; bodies marked `todo!()` land in M1–M4.
 
+pub mod client;
 pub mod config;
 pub mod error;
 pub mod kelvin;
@@ -12,6 +13,7 @@ pub mod profile;
 pub mod proto;
 pub mod shader;
 
+pub use client::{Client, socket_path};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use params::{ColorParams, Param};

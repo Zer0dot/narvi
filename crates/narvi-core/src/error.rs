@@ -26,4 +26,7 @@ pub enum Error {
 
     #[error("config: {0}")]
     Config(String),
+
+    #[error("daemon: {0}")]
+    Daemon(String),
 }
