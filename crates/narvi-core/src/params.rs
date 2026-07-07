@@ -131,3 +131,42 @@ impl ColorParams {
 fn clamp(v: f32, (lo, hi): (f32, f32)) -> f32 {
     v.clamp(lo, hi)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_clamps_to_range() {
+        let mut p = ColorParams::default();
+        p.set(Param::Vibrance, 5.0);
+        assert_eq!(p.vibrance, 2.0);
+        p.set(Param::Temperature, 99999.0);
+        assert_eq!(p.temperature, 10000);
+        p.set(Param::Brightness, 0.0);
+        assert_eq!(p.brightness, 0.5);
+        p.set(Param::B, -1.0);
+        assert_eq!(p.rgb[2], 0.0);
+    }
+
+    #[test]
+    fn nudge_is_relative_and_clamped() {
+        let mut p = ColorParams::default();
+        p.nudge(Param::Vibrance, 0.05);
+        assert!((p.vibrance - 1.05).abs() < 1e-6);
+        p.nudge(Param::Gamma, 10.0);
+        assert_eq!(p.gamma, 2.0);
+    }
+
+    #[test]
+    fn clamped_repairs_loaded_values() {
+        let p = ColorParams {
+            contrast: 9.0,
+            temperature: 12,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(p.contrast, 2.0);
+        assert_eq!(p.temperature, 1000);
+    }
+}
