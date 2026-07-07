@@ -1,8 +1,8 @@
 # CLAUDE.md — Narvi
 
-> **Status: pre-implementation.** This repo currently contains only design docs and a
-> reference shader. There is no `Cargo.toml`, no Rust source, no `flake.nix`, no git
-> history yet. The work is to build the suite per the docs, in milestone order.
+> **Status: v1 implemented (M0–M8).** All four binaries work against a live Hyprland
+> session. `BUILD_PLAN.md` milestones are the map of what exists; keep changes within
+> the contracts in `PROTOCOL.md`.
 
 ## Read order
 
@@ -26,18 +26,20 @@ brightness/contrast + gamma + per-channel RGB — driven by a single generated
 - **`narvi-gui`** — egui dashboard with live preview.
 - **tray** — `ksni` StatusNotifierItem (lives in `narvid` or a `narvi-tray` bin).
 
-## Planned layout (target — does not exist yet)
+## Layout
 
 ```
 narvi/
 ├── Cargo.toml                # workspace
 ├── crates/
-│   ├── narvi-core/           # ColorParams, shader gen, kelvin_to_rgb, config, profiles (lib)
-│   ├── narvid/               # daemon binary
+│   ├── narvi-core/           # ColorParams, shader gen, kelvin, pipeline, config, client (lib)
+│   ├── narvid/               # daemon binary (socket, apply, sched, socket2, watch)
 │   ├── narvi/                # CLI binary
-│   └── narvi-gui/            # egui app binary
-├── shaders/narvi.frag        # reference shader (PARAMS block regenerated at runtime) — EXISTS
-├── flake.nix                 # package + home-manager module
+│   ├── narvi-gui/            # egui app binary (Saturn theme, wgpu backend)
+│   └── narvi-tray/           # ksni tray binary
+├── shaders/narvi.frag        # reference shader (copy kept in narvi-core/src, test-synced)
+├── flake.nix + nix/          # package + home-manager module
+├── PKGBUILD                  # AUR
 └── LICENSE                   # MIT
 ```
 
@@ -47,9 +49,10 @@ and subscribe for updates.
 
 ## Stack
 
-Rust + egui. Key crates: `eframe`/`egui` + `egui_extras`, `ksni` (tray), `tokio` (daemon),
-`serde`/`serde_json`/`toml`, `clap`, `sunrise` + `chrono`, `globset` (class match — NOT
-regex), `notify`, `directories`, `anyhow` (bins) + `thiserror` (lib).
+Rust + egui. Key crates: `eframe`/`egui` (wgpu backend — glow/EGL is unreliable on
+NVIDIA + Wayland) + `image`, `ksni` (tray), `tokio` (daemon), `serde`/`serde_json`/`toml`,
+`clap`, `sunrise` + `chrono`, `globset` (class match — NOT regex), `notify`,
+`directories`, `anyhow` (bins) + `thiserror` (lib).
 
 ## Build / test / run (once scaffolded)
 

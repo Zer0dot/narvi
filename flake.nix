@@ -10,24 +10,45 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        # dlopen'd at runtime by winit/wgpu; patched into the GUI's rpath.
+        guiLibs = with pkgs; [
+          wayland
+          libxkbcommon
+          vulkan-loader
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXi
+        ];
       in
       {
-        # M0 stub — fleshed out in M8 (package + AUR-equivalent build).
         packages.narvi = pkgs.rustPlatform.buildRustPackage {
           pname = "narvi";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = [ pkgs.libxkbcommon pkgs.wayland pkgs.gtk3 ];
+          buildInputs = guiLibs;
+          postFixup = ''
+            patchelf --add-rpath ${pkgs.lib.makeLibraryPath guiLibs} $out/bin/narvi-gui
+          '';
+          meta = {
+            description = "Real-time color management for Hyprland";
+            homepage = "https://github.com/zer0dot/narvi";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "narvi";
+          };
         };
         packages.default = self.packages.${system}.narvi;
 
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = [ pkgs.cargo pkgs.rustc pkgs.rustfmt pkgs.clippy pkgs.pkg-config ];
-          buildInputs = [ pkgs.libxkbcommon pkgs.wayland pkgs.gtk3 ];
+          nativeBuildInputs = with pkgs; [ cargo rustc rustfmt clippy pkg-config ];
+          buildInputs = guiLibs;
+          # cargo-built (unwrapped) GUI needs these at runtime on NixOS.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath guiLibs;
         };
       })
-    # M8: // { homeManagerModules.narvi = import ./nix/hm-module.nix self; };
-    ;
+    // {
+      homeManagerModules.narvi = import ./nix/hm-module.nix self;
+      homeManagerModules.default = self.homeManagerModules.narvi;
+    };
 }

@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for color state, shader generation, config, and the daemon
 //! socket protocol. The daemon and all clients depend on these types and never duplicate
-//! param logic. M0 freezes the public API; bodies marked `todo!()` land in M1–M4.
+//! param logic.
 
 pub mod client;
 pub mod config;
