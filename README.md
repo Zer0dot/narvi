@@ -27,15 +27,52 @@ narvi toggle                      # shader on/off
 narvi-gui                         # dashboard
 ```
 
-Config lives at `~/.config/narvi/config.toml` (seeded with presets on first run:
-Default, Gaming, Movie, Photo, Night) and hot-reloads on save. The generated shader
-lands at `~/.config/hypr/shaders/narvi.frag`. See `PROTOCOL.md` for the full schema
-and socket protocol.
+## Configuration (TOML)
 
-Per-app auto-switch: give a profile `match = ["steam_app_*", "mpv"]` and focusing a
-matching window applies it; focusing away reverts. Scheduling: `mode = "sun"` with
-`latitude`/`longitude` (or `mode = "fixed"` with `day_time`/`night_time`) blends
-between `day_profile` and `night_profile` over `transition_minutes`.
+`~/.config/narvi/config.toml` — seeded with presets on first run (Default, Gaming,
+Movie, Photo, Night) and **hot-reloaded on save**. The generated shader lands at
+`~/.config/hypr/shaders/narvi.frag`. Full schema in `PROTOCOL.md`.
+
+```toml
+[general]
+active_profile = "default"   # fallback when no saved state exists
+restore_on_start = true      # restore last state (params/profile/on-off) at login
+
+[hyprland]
+shader_path = "~/.config/hypr/shaders/narvi.frag"
+
+[scheduling]
+enabled = true
+mode = "sun"                 # "sun" | "fixed" | "off"
+latitude = 40.71             # sun mode
+longitude = -74.01
+day_time = "07:30"           # fixed mode only, HH:MM
+night_time = "21:00"
+day_profile = "Default"
+night_profile = "Night"
+transition_minutes = 30      # smooth blend window around each boundary
+
+[ui]
+theme = "saturn"
+accent = "#E0A23C"           # GUI accent override
+preview = "sample"           # "sample" | "gradient"
+preview_image = ""           # optional path replacing the preview image
+
+[[profiles]]                 # ranges: PROTOCOL.md; out-of-range values clamp
+name = "gaming"
+vibrance = 1.5               # 0.0-2.0, protective (spares skin tones)
+saturation = 1.1             # 0.0-2.0, flat
+temperature = 6500           # 1000-10000 K
+brightness = 1.0             # 0.5-1.5
+contrast = 1.05              # 0.5-2.0
+gamma = 1.0                  # 0.5-2.0
+rgb = [1.0, 1.0, 1.0]        # per-channel gain, 0.0-2.0
+match = ["steam_app_*", "gamescope"]   # auto-switch: window-class globs
+```
+
+Per-app auto-switch: focusing a window whose class matches a profile's `match`
+globs applies that profile; focusing away reverts. Scheduling blends day↔night
+profiles over `transition_minutes`. Unknown keys warn and are ignored.
 
 ## Install
 
