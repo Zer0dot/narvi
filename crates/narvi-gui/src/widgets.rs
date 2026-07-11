@@ -51,14 +51,14 @@ fn track(
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click_and_drag());
     let mut changed = false;
 
-    if resp.dragged() || resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let new = lo + t * (hi - lo);
-            if new != *value {
-                *value = new;
-                changed = true;
-            }
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let new = lo + t * (hi - lo);
+        if new != *value {
+            *value = new;
+            changed = true;
         }
     }
 
