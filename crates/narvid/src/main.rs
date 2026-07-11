@@ -26,11 +26,6 @@ async fn main() -> Result<()> {
         log::info!("narvid already running; exiting");
         return Ok(());
     };
-    // Bind early so clients can connect (and stop auto-spawning) while the
-    // initial config load / apply below is still running.
-    let listener = server::bind(&sock).await?;
-    log::info!("listening on {}", sock.display());
-
     let cfg_path = match std::env::var_os("NARVI_CONFIG") {
         Some(p) => p.into(),
         None => Config::default_path()?,
@@ -47,6 +42,15 @@ async fn main() -> Result<()> {
         log::info!("seeded default config at {}", cfg_path.display());
         cfg
     };
+
+    // Bind only after config load succeeded (a doomed daemon must not look
+    // reachable), but before the slower restore/apply so clients can
+    // connect — and stop auto-spawning — during startup.
+    let Some(listener) = server::bind(&sock).await? else {
+        log::info!("another daemon owns {}; exiting", sock.display());
+        return Ok(());
+    };
+    log::info!("listening on {}", sock.display());
 
     let mut daemon = Daemon::new(cfg, cfg_path);
     daemon.restore();

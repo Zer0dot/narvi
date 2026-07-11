@@ -34,17 +34,21 @@ pub fn try_lock(path: &std::path::Path) -> Result<Option<std::fs::File>> {
 
 /// Bind the listener. Caller holds the instance lock, so an existing socket
 /// file is stale by definition; the connect probe is defense in depth.
-pub async fn bind(path: &std::path::Path) -> Result<UnixListener> {
+/// `None` = a live daemon (a pre-lock version) still owns the socket; the
+/// caller should exit 0 so `Restart=on-failure` is not tripped.
+pub async fn bind(path: &std::path::Path) -> Result<Option<UnixListener>> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     if path.exists() {
         if UnixStream::connect(path).await.is_ok() {
-            anyhow::bail!("narvid already running on {}", path.display());
+            return Ok(None);
         }
         std::fs::remove_file(path)?; // stale socket from a dead daemon
     }
-    UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))
+    UnixListener::bind(path)
+        .map(Some)
+        .with_context(|| format!("bind {}", path.display()))
 }
 
 pub async fn serve(listener: UnixListener, daemon: Arc<Mutex<Daemon>>) {
@@ -121,7 +125,26 @@ async fn recv(
 
 #[cfg(test)]
 mod tests {
-    use super::try_lock;
+    use super::{bind, try_lock};
+
+    #[tokio::test]
+    async fn bind_yields_none_when_socket_is_live() {
+        let path = std::env::temp_dir().join(format!("narvid-live-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _live = tokio::net::UnixListener::bind(&path).unwrap();
+        // A connectable socket means another daemon owns it: not an error.
+        assert!(bind(&path).await.unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn bind_replaces_stale_socket_file() {
+        let path = std::env::temp_dir().join(format!("narvid-stale-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        drop(tokio::net::UnixListener::bind(&path).unwrap()); // file stays
+        assert!(bind(&path).await.unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn lock_is_exclusive_until_released() {
