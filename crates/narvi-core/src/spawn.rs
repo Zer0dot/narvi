@@ -3,7 +3,8 @@
 //! `DaemonSpawner` waits out a grace window first (so a daemon already
 //! starting — e.g. under systemd — can win), rate-limits attempts via
 //! `SpawnGuard`, kills a child stuck starting past a deadline, reaps
-//! exits, and gives up after repeated failures. When the `narvi.service`
+//! exits (any exit while the daemon stays unreachable counts as a
+//! failure), and gives up after repeated failures. When the `narvi.service`
 //! systemd user unit exists it starts that instead of exec'ing directly,
 //! so the daemon stays supervised in its own cgroup. Single-instance
 //! safety comes from `narvid`'s exclusive file lock. Opt out with
@@ -48,7 +49,7 @@ pub fn autospawn_disabled(value: Option<&str>) -> bool {
     })
 }
 
-/// True when `systemctl show -p LoadState --value` output means the unit exists.
+/// True when `systemctl show -p LoadState --value` says the unit exists.
 pub fn unit_loaded(load_state: &str) -> bool {
     load_state.trim() == "loaded"
 }
@@ -110,6 +111,9 @@ pub struct DaemonSpawner {
     /// Start of the current unreachable streak; grace counts from here.
     first_tick: Option<Instant>,
     child: Option<(Child, Instant)>,
+    /// Live children handed off by [`Self::reset`]: never killed, but kept
+    /// so their eventual exits are reaped (no zombies).
+    detached: Vec<Child>,
 }
 
 impl DaemonSpawner {
@@ -126,6 +130,7 @@ impl DaemonSpawner {
             method: None,
             first_tick: None,
             child: None,
+            detached: Vec::new(),
         }
     }
 
@@ -134,11 +139,18 @@ impl DaemonSpawner {
     pub fn reset(&mut self) {
         self.first_tick = None;
         self.failures = 0;
-        // The daemon is reachable: reap the child if it exited, else detach
-        // it — a later outage must never kill() the live daemon we spawned.
-        if let Some((mut child, _)) = self.child.take() {
-            let _ = child.try_wait();
+        // The daemon is reachable: detach the child — a later outage must
+        // never kill() the live daemon we spawned, but it must be reaped.
+        if let Some((child, _)) = self.child.take() {
+            self.detached.push(child);
         }
+        self.reap_detached();
+    }
+
+    /// Drop detached children that exited; keep live ones for a later sweep.
+    fn reap_detached(&mut self) {
+        self.detached
+            .retain_mut(|c| matches!(c.try_wait(), Ok(None) | Err(_)));
     }
 
     /// Call on each unreachable-daemon retry: reaps a finished child, then
@@ -152,6 +164,7 @@ impl DaemonSpawner {
         if self.disabled {
             return SpawnStatus::Disabled;
         }
+        self.reap_detached();
         if let Some((child, started)) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(None) => {
@@ -168,6 +181,9 @@ impl DaemonSpawner {
                     return self.wait_status();
                 }
                 Ok(Some(status)) => {
+                    // The daemon is still unreachable when tick runs, so any
+                    // exit — even a clean lost-lock duplicate's 0 — means the
+                    // attempt did not help; count it so GaveUp is reachable.
                     if status.success() {
                         log::info!("spawned {} exited: {status}", self.program);
                     } else {
@@ -175,9 +191,9 @@ impl DaemonSpawner {
                             "spawned {} exited: {status} — run it manually to see why",
                             self.program
                         );
-                        self.note_failure();
                     }
                     self.child = None;
+                    self.note_failure();
                 }
                 Err(e) => {
                     // Can't tell if it lives: kill so it never leaks untracked.
@@ -307,6 +323,7 @@ mod tests {
             method: Some(Method::Direct), // never probe systemctl in tests
             first_tick: None,
             child: None,
+            detached: Vec::new(),
         }
     }
 
@@ -404,7 +421,7 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(s.tick_at(t0), Scheduled); // spawn fails
         assert_eq!(s.failures, 1);
-        assert_eq!(s.tick_at(t0), Scheduled); // failed attempt consumed the window
+        assert_eq!(s.tick_at(t0), Scheduled); // attempt consumed the window
         assert_eq!(s.failures, 1);
     }
 
@@ -428,7 +445,8 @@ mod tests {
         assert_eq!(s.tick_at(t0), Starting);
         let pid = s.child.as_ref().map(|(c, _)| c.id());
         let last = s.guard.last_attempt;
-        assert_eq!(s.tick_at(t0 + Duration::from_secs(1)), Starting); // alive branch
+        // Alive branch: still Starting, same child, window untouched.
+        assert_eq!(s.tick_at(t0 + Duration::from_secs(1)), Starting);
         assert_eq!(s.child.as_ref().map(|(c, _)| c.id()), pid); // no respawn
         assert_eq!(s.guard.last_attempt, last); // window untouched
         kill(&mut s);
@@ -456,7 +474,7 @@ mod tests {
         assert_eq!(s.tick_at(t0), Scheduled);
         s.reset(); // as after a successful connect
         let t1 = t0 + Duration::from_secs(10);
-        assert_eq!(s.tick_at(t1), Scheduled); // grace counts from the new streak
+        assert_eq!(s.tick_at(t1), Scheduled); // grace restarts per streak
         assert_eq!(s.tick_at(t1 + grace), Starting);
         kill(&mut s);
     }
@@ -473,18 +491,34 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(s.child.is_none());
-        assert_eq!(s.failures, 0); // exit 0 (lost-lock duplicate) is not a failure
+        // Still unreachable, so even a clean exit counts as a failure.
+        assert_eq!(s.failures, 1);
+    }
+
+    #[test]
+    fn clean_exits_while_unreachable_reach_gave_up() {
+        // `true` exits 0 every time; the daemon never becomes reachable,
+        // so the spawner must still hit GaveUp instead of retrying forever.
+        let mut s = spawner("true", &[], ZERO, ZERO, BIG);
+        s.max_failures = 2;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while s.tick() != GaveUp {
+            assert!(Instant::now() < deadline, "never gave up");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(s.failures, 2);
+        assert!(s.child.is_none());
     }
 
     #[test]
     fn reset_detaches_live_child_so_later_tick_cannot_kill_it() {
-        // startup_timeout ZERO: a child still held after reset would be
-        // killed on the very next tick — the HIGH stale-handle bug.
+        // startup_timeout ZERO: a child still held across reset would be
+        // treated as stuck and killed on the very next tick.
         let mut s = spawner("sleep", &["30"], BIG, ZERO, ZERO);
         let t0 = Instant::now();
         assert_eq!(s.tick_at(t0), Starting);
         let pid = s.child.as_ref().map(|(c, _)| c.id()).unwrap_or(0);
-        s.reset(); // connect succeeded: forget the now-live daemon
+        s.reset(); // connect succeeded: stop tracking the now-live daemon
         assert!(s.child.is_none());
         assert_eq!(s.tick_at(t0 + Duration::from_secs(30)), Scheduled);
         // Alive and not a zombie: the detached daemon survived the tick.
@@ -494,6 +528,24 @@ mod tests {
             "live daemon was killed: {st:?}"
         );
         let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+
+    #[test]
+    fn detached_child_is_reaped_after_it_exits() {
+        let mut s = spawner("sleep", &["30"], BIG, ZERO, ZERO);
+        assert_eq!(s.tick_at(Instant::now()), Starting);
+        let pid = s.child.as_ref().map(|(c, _)| c.id()).unwrap_or(0);
+        s.reset(); // detach the live child instead of dropping it
+        assert_eq!(s.detached.len(), 1);
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state_of(pid) != Some('Z') {
+            assert!(Instant::now() < deadline, "child never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        s.reset(); // any later reset/tick sweeps detached children
+        assert!(s.detached.is_empty());
+        assert_eq!(state_of(pid), None, "zombie was not reaped");
     }
 
     #[test]
@@ -528,6 +580,32 @@ mod tests {
         assert_eq!(s.failures, 0);
         assert_eq!(s.tick(), Starting);
         kill(&mut s);
+    }
+
+    #[test]
+    fn unit_method_builds_systemctl_start_command() {
+        let mut s = spawner("narvid", &[], BIG, ZERO, BIG);
+        s.method = Some(Method::Unit);
+        let cmd = s.command();
+        assert_eq!(cmd.get_program(), "systemctl");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--user", "start", UNIT]);
+        assert_eq!(s.method, Some(Method::Unit)); // preset method is kept
+    }
+
+    #[test]
+    fn direct_method_builds_program_command_with_args() {
+        let mut s = spawner("narvid", &["--flag"], BIG, ZERO, BIG);
+        let cmd = s.command();
+        assert_eq!(cmd.get_program(), "narvid");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--flag"]);
     }
 
     #[test]
