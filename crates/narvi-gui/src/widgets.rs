@@ -68,11 +68,11 @@ fn track(
     let x = rect.left() + t * rect.width();
     painter.line_segment(
         [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-        Stroke::new(2.0, theme::BORDER),
+        Stroke::new(2.0_f32, theme::BORDER),
     );
     painter.line_segment(
         [Pos2::new(rect.left(), y), Pos2::new(x, y)],
-        Stroke::new(2.0, accent.linear_multiply(0.6)),
+        Stroke::new(2.0_f32, accent.linear_multiply(0.6)),
     );
     let hot = resp.hovered() || resp.dragged();
     let color = if hot { theme::ACCENT_GLOW } else { accent };
@@ -88,7 +88,7 @@ pub fn button(ui: &mut egui::Ui, label: &str, accent: Color32, primary: bool) ->
     } else {
         egui::Button::new(text.color(accent))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, theme::BORDER))
+            .stroke(Stroke::new(1.0_f32, theme::BORDER))
     };
     ui.add(b.corner_radius(10.0))
 }
