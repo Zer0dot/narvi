@@ -27,6 +27,10 @@ narvi toggle                      # shader on/off
 narvi-gui                         # dashboard
 ```
 
+`narvi-gui` and `narvi-tray` auto-start `narvid` if the daemon stays unreachable
+for a few seconds (rate-limited); the `narvi` CLI never does. A file lock next to
+the socket guarantees a single daemon instance either way.
+
 Config lives at `~/.config/narvi/config.toml` (seeded with presets on first run:
 Default, Gaming, Movie, Photo, Night) and hot-reloads on save. The generated shader
 lands at `~/.config/hypr/shaders/narvi.frag`. See `PROTOCOL.md` for the full schema

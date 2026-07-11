@@ -31,6 +31,8 @@ Narvi is a moon of Saturn; the project is part of a Saturn-themed family.
   watches Hyprland's event socket (`socket2`, `activewindow`) for per-app auto-switch.
 - **Clients (GUI, tray, CLI):** thin front-ends that talk to `narvid` over a **Unix
   domain socket** using newline-delimited JSON. Single source of truth, no races.
+  GUI and tray auto-start `narvid` after a short unreachable grace; the CLI never
+  does. A flock next to the socket enforces a single daemon instance.
 - **Hotkeys (Wayland-correct):** Hyprland keybinds invoke the `narvi` CLI
   (`narvi nudge vibrance +0.05`, `narvi profile next`, `narvi toggle`), which messages
   the daemon. The home-manager module ships sensible default binds.
