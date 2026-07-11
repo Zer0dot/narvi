@@ -46,6 +46,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 ksni = "0.3"
 
 # integration
+libc = "0.2"
 globset = "0.4"
 notify = "8"
 sunrise = "1"

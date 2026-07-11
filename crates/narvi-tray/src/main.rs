@@ -1,6 +1,8 @@
 //! `narvi-tray` — StatusNotifierItem. Click toggles the GUI; menu = presets + Quit.
 
+use std::process::{Output, Stdio};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::Result;
 use ksni::TrayMethods;
@@ -17,24 +19,75 @@ struct NarviTray {
     gui_child: Option<std::process::Child>,
 }
 
+/// Bound on hyprctl/pgrep/pkill; a stalled compositor must not wedge the tray.
+const HELPER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Grace period after SIGTERM before escalating to SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(1);
+
 /// What a tray click should do to the GUI.
 #[derive(Debug, PartialEq, Eq)]
 enum GuiAction {
-    Close,
+    /// Graceful `hyprctl dispatch closewindow`.
+    CloseWindow,
+    /// SIGTERM our own spawned child (window not mapped yet).
+    TermChild,
+    /// SIGTERM any narvi-gui process (ours or external).
+    TermAny,
     Spawn,
 }
 
-/// Toggle on window presence; fall back to child liveness if unknown.
-fn gui_action(window: Option<bool>, child_alive: bool) -> GuiAction {
+/// Decide from window presence, our child's liveness, and whether any
+/// narvi-gui process runs (catches external launches and startup races).
+fn gui_action(window: Option<bool>, child_alive: bool, gui_process: bool) -> GuiAction {
     match window {
-        Some(true) => GuiAction::Close,
+        Some(true) => GuiAction::CloseWindow,
+        // Window not mapped yet but a GUI is starting: close it, never respawn.
+        Some(false) if child_alive => GuiAction::TermChild,
+        Some(false) if gui_process => GuiAction::TermAny,
         Some(false) => GuiAction::Spawn,
-        None if child_alive => GuiAction::Close,
+        None if child_alive || gui_process => GuiAction::TermAny,
         None => GuiAction::Spawn,
     }
 }
 
-/// Parse `hyprctl -j clients` JSON; Some(has narvi-gui window) or None if malformed.
+/// Run `cmd`, killing it past `timeout`; None on spawn/timeout/IO error.
+fn output_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Option<Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = cmd.spawn().ok()?;
+    let pid = child.id() as i32;
+    let (tx, rx) = mpsc::channel();
+    // Waiter thread owns the child; it reaps even after a timeout kill.
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(res) => res.ok(),
+        Err(_) => {
+            // Kill by pid: child is owned by the waiter, which then reaps it.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            None
+        }
+    }
+}
+
+/// SIGTERM `child`; escalate to SIGKILL after TERM_GRACE. Always reaps.
+fn term_and_reap(mut child: std::process::Child) {
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let deadline = std::time::Instant::now() + TERM_GRACE;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Parse clients JSON: Some(narvi-gui window present); None if malformed.
 fn has_gui_window(clients_json: &str) -> Option<bool> {
     let v: serde_json::Value = serde_json::from_str(clients_json).ok()?;
     let clients = v.as_array()?;
@@ -45,16 +98,23 @@ fn has_gui_window(clients_json: &str) -> Option<bool> {
     )
 }
 
-/// Ask Hyprland whether a narvi-gui window exists; None if hyprctl fails.
+/// Ask Hyprland whether a narvi-gui window exists; None if hyprctl
+/// fails, hangs, or returns malformed output.
 fn query_gui_window() -> Option<bool> {
-    let out = std::process::Command::new("hyprctl")
-        .args(["-j", "clients"])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("hyprctl");
+    cmd.args(["-j", "clients"]);
+    let out = output_with_timeout(cmd, HELPER_TIMEOUT)?;
     if !out.status.success() {
         return None;
     }
     has_gui_window(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Is any narvi-gui process running (ours or launched externally)?
+fn query_gui_process() -> bool {
+    let mut cmd = std::process::Command::new("pgrep");
+    cmd.args(["-x", "narvi-gui"]);
+    output_with_timeout(cmd, HELPER_TIMEOUT).is_some_and(|o| o.status.success())
 }
 
 impl NarviTray {
@@ -82,37 +142,53 @@ impl NarviTray {
         }
     }
 
-    /// Kill + reap any lingering GUI child before a fresh spawn.
-    fn kill_gui_child(&mut self) {
-        if let Some(mut c) = self.gui_child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
+    /// SIGTERM + reap our spawned GUI child, if any.
+    fn term_gui_child(&mut self) {
+        if let Some(c) = self.gui_child.take() {
+            term_and_reap(c);
         }
     }
 
-    /// Show the GUI if no window is open, otherwise close it.
+    /// Graceful close via Hyprland; reap our child off-thread once it exits.
+    fn close_gui_window(&mut self) {
+        let mut cmd = std::process::Command::new("hyprctl");
+        cmd.args(["dispatch", "closewindow", "class:^(narvi-gui)$"]);
+        match output_with_timeout(cmd, HELPER_TIMEOUT) {
+            Some(o) if o.status.success() => {
+                if let Some(mut c) = self.gui_child.take() {
+                    // Child exits soon after its window closes; reap it then.
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                }
+            }
+            Some(o) => log::warn!("gui close failed: {}", o.status),
+            None => log::warn!("gui close failed: hyprctl error or timeout"),
+        }
+    }
+
+    /// Show the GUI if none is open or starting, otherwise close it.
     fn toggle_gui(&mut self) {
         let window = query_gui_window();
         let alive = self.gui_child_alive();
-        match gui_action(window, alive) {
-            GuiAction::Close if window == Some(true) => {
-                match std::process::Command::new("hyprctl")
-                    .args(["dispatch", "closewindow", "class:^(narvi-gui)$"])
-                    .output()
-                {
-                    Ok(o) if !o.status.success() => log::warn!("gui close failed: {}", o.status),
-                    Err(e) => log::warn!("gui close failed: {e}"),
-                    Ok(_) => {}
+        // pgrep only when the window can't already answer the toggle.
+        let gui_process = window != Some(true) && query_gui_process();
+        match gui_action(window, alive, gui_process) {
+            GuiAction::CloseWindow => self.close_gui_window(),
+            GuiAction::TermChild => self.term_gui_child(),
+            GuiAction::TermAny => {
+                // pkill sends SIGTERM to every narvi-gui, our child included.
+                let mut cmd = std::process::Command::new("pkill");
+                cmd.args(["-x", "narvi-gui"]);
+                if output_with_timeout(cmd, HELPER_TIMEOUT).is_none() {
+                    log::warn!("pkill narvi-gui failed");
                 }
+                self.term_gui_child();
             }
-            GuiAction::Close => self.kill_gui_child(),
-            GuiAction::Spawn => {
-                self.kill_gui_child();
-                match std::process::Command::new("narvi-gui").spawn() {
-                    Ok(child) => self.gui_child = Some(child),
-                    Err(e) => log::warn!("gui spawn failed: {e}"),
-                }
-            }
+            GuiAction::Spawn => match std::process::Command::new("narvi-gui").spawn() {
+                Ok(child) => self.gui_child = Some(child),
+                Err(e) => log::warn!("gui spawn failed: {e}"),
+            },
         }
     }
 }
@@ -340,17 +416,110 @@ mod tests {
     }
 
     #[test]
-    fn action_follows_window_presence() {
-        // Window state wins regardless of child liveness (zombie-proof).
-        assert_eq!(gui_action(Some(true), false), GuiAction::Close);
-        assert_eq!(gui_action(Some(true), true), GuiAction::Close);
-        assert_eq!(gui_action(Some(false), true), GuiAction::Spawn);
-        assert_eq!(gui_action(Some(false), false), GuiAction::Spawn);
+    fn action_window_present_closes_gracefully() {
+        assert_eq!(gui_action(Some(true), false, false), GuiAction::CloseWindow);
+        assert_eq!(gui_action(Some(true), true, true), GuiAction::CloseWindow);
     }
 
     #[test]
-    fn action_falls_back_to_child_liveness() {
-        assert_eq!(gui_action(None, true), GuiAction::Close);
-        assert_eq!(gui_action(None, false), GuiAction::Spawn);
+    fn action_startup_race_closes_instead_of_respawning() {
+        // Child spawned but window not mapped yet: a second click must
+        // terminate the launching GUI, never kill-and-respawn it.
+        assert_eq!(gui_action(Some(false), true, true), GuiAction::TermChild);
+        assert_eq!(gui_action(Some(false), true, false), GuiAction::TermChild);
+        // Same race for an externally launched GUI.
+        assert_eq!(gui_action(Some(false), false, true), GuiAction::TermAny);
+    }
+
+    #[test]
+    fn action_spawns_only_when_nothing_runs() {
+        assert_eq!(gui_action(Some(false), false, false), GuiAction::Spawn);
+        assert_eq!(gui_action(None, false, false), GuiAction::Spawn);
+    }
+
+    #[test]
+    fn action_hyprctl_unknown_falls_back_to_processes() {
+        assert_eq!(gui_action(None, true, false), GuiAction::TermAny);
+        assert_eq!(gui_action(None, false, true), GuiAction::TermAny);
+        assert_eq!(gui_action(None, true, true), GuiAction::TermAny);
+    }
+
+    #[test]
+    fn output_with_timeout_returns_output() {
+        let mut cmd = std::process::Command::new("echo");
+        cmd.arg("hi");
+        let out = output_with_timeout(cmd, Duration::from_secs(5));
+        let out = out.unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[test]
+    fn output_with_timeout_kills_hung_command() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let t0 = std::time::Instant::now();
+        assert!(output_with_timeout(cmd, Duration::from_millis(100)).is_none());
+        assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_with_timeout_missing_binary_is_none() {
+        let cmd = std::process::Command::new("narvi-definitely-missing-bin");
+        assert!(output_with_timeout(cmd, Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn term_and_reap_is_graceful_and_bounded() {
+        // sleep exits on SIGTERM, so we return well before the SIGKILL path.
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let t0 = std::time::Instant::now();
+        term_and_reap(child);
+        assert!(t0.elapsed() < TERM_GRACE);
+    }
+
+    fn test_tray() -> (NarviTray, mpsc::Receiver<Command>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            NarviTray {
+                profiles: Vec::new(),
+                active: None,
+                enabled: true,
+                cmd: tx,
+                gui_child: None,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn child_liveness_no_child() {
+        let (mut tray, _rx) = test_tray();
+        assert!(!tray.gui_child_alive());
+    }
+
+    #[test]
+    fn child_liveness_running_then_reaped() {
+        let (mut tray, _rx) = test_tray();
+        tray.gui_child = std::process::Command::new("sleep").arg("30").spawn().ok();
+        assert!(tray.gui_child.is_some());
+        assert!(tray.gui_child_alive()); // still running, handle kept
+        assert!(tray.gui_child.is_some());
+        tray.term_gui_child();
+        assert!(tray.gui_child.is_none()); // terminated and reaped
+        assert!(!tray.gui_child_alive());
+    }
+
+    #[test]
+    fn child_liveness_drops_exited_child() {
+        let (mut tray, _rx) = test_tray();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let _ = child.wait(); // ensure it has exited; wait() leaves try_wait Ok(Some)
+        tray.gui_child = Some(child);
+        assert!(!tray.gui_child_alive());
+        assert!(tray.gui_child.is_none()); // handle dropped after reap
     }
 }
