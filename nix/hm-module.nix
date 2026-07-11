@@ -74,7 +74,9 @@ in
     systemd.user.services.narvi-tray = lib.mkIf (cfg.service.enable && cfg.tray.enable) {
       Unit = {
         Description = "Narvi tray";
-        After = [ "narvi.service" ];
+        # No After=narvi.service: sessions ordering graphical-session.target
+        # after its wanted units would cycle and DROP the daemon's start job
+        # (observed live). Autospawn covers tray-before-daemon races anyway.
         PartOf = [ "graphical-session.target" ];
       };
       Service = {
