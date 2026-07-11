@@ -23,7 +23,8 @@ struct NarviTray {
 const HELPER_TIMEOUT: Duration = Duration::from_secs(2);
 /// Grace period after SIGTERM before escalating to SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(1);
-/// Grace for the child to exit after its window closes, before SIGKILL.
+/// Grace for the child to exit after closewindow; SIGKILL follows only
+/// once no narvi-gui window remains.
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// comm match: `narvi-gui` plus the Nix wrapper's `.narvi-gui-wrapped`
 /// (comm truncates to 15 chars, so no trailing anchor).
@@ -56,6 +57,8 @@ fn gui_action(window: Option<bool>, child_alive: bool, gui_process: bool) -> Gui
 }
 
 /// Run `cmd`, killing it past `timeout`; None on spawn/timeout/IO error.
+/// The reader thread may outlive the call if a grandchild keeps the
+/// stdout pipe open, but the caller never waits past ~`timeout`.
 fn output_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Option<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -79,8 +82,12 @@ fn output_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Opt
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Child exited; the reader sees EOF and finishes promptly.
-                let stdout = rx.recv_timeout(timeout).ok()?.ok()?;
+                // Child exited, but a grandchild holding the pipe write
+                // end can stall the reader: bound the wait to the same
+                // deadline (plus slack) so total wall time stays ~timeout.
+                let left =
+                    deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(100);
+                let stdout = rx.recv_timeout(left).ok()?.ok()?;
                 return Some(Output {
                     status,
                     stdout,
@@ -101,25 +108,73 @@ fn output_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Opt
     }
 }
 
-/// Wait up to `grace` for exit, then SIGKILL. Always reaps; None only
-/// if the final wait fails.
-fn reap_or_kill(mut child: std::process::Child, grace: Duration) -> Option<ExitStatus> {
+/// Wait up to `grace` for exit without killing; Err(child) hands the
+/// still-running (or wait-erroring) child back to the caller.
+fn reap_within(
+    mut child: std::process::Child,
+    grace: Duration,
+) -> Result<ExitStatus, std::process::Child> {
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         match child.try_wait() {
-            Ok(Some(st)) => return Some(st),
+            Ok(Some(st)) => return Ok(st),
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(_) => break,
         }
     }
-    let _ = child.kill();
-    child.wait().ok()
+    Err(child)
+}
+
+/// Wait up to `grace` for exit, then SIGKILL. Always reaps; None only
+/// if the final wait fails.
+fn reap_or_kill(child: std::process::Child, grace: Duration) -> Option<ExitStatus> {
+    match reap_within(child, grace) {
+        Ok(st) => Some(st),
+        Err(mut child) => {
+            let _ = child.kill();
+            child.wait().ok()
+        }
+    }
+}
+
+/// SIGKILL a child still alive after closewindow only when no narvi-gui
+/// window remains: a surviving window may be the child's own (with two
+/// instances, closewindow may have hit the other one).
+fn close_should_kill(window_remains: Option<bool>) -> bool {
+    window_remains == Some(false)
 }
 
 /// SIGTERM `child`; escalate to SIGKILL after TERM_GRACE. Always reaps.
 fn term_and_reap(child: std::process::Child) -> Option<ExitStatus> {
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     reap_or_kill(child, TERM_GRACE)
+}
+
+/// Newest Hyprland instance dir name under `hypr_dir` (mtime order).
+fn newest_instance_sig(hypr_dir: &std::path::Path) -> Option<std::ffi::OsString> {
+    std::fs::read_dir(hypr_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .max_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        })
+        .map(|e| e.file_name())
+}
+
+/// hyprctl invocation. Supplies HIS from the newest instance dir when
+/// the env var is unset (systemd user services can start without it).
+fn hyprctl_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new("hyprctl");
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none()
+        && let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+        && let Some(sig) = newest_instance_sig(&std::path::Path::new(&runtime).join("hypr"))
+    {
+        cmd.env("HYPRLAND_INSTANCE_SIGNATURE", sig);
+    }
+    cmd
 }
 
 /// Parse clients JSON: Some(narvi-gui window present); None if malformed.
@@ -136,7 +191,7 @@ fn has_gui_window(clients_json: &str) -> Option<bool> {
 /// Ask Hyprland whether a narvi-gui window exists; None if hyprctl
 /// fails, hangs, or returns malformed output.
 fn query_gui_window() -> Option<bool> {
-    let mut cmd = std::process::Command::new("hyprctl");
+    let mut cmd = hyprctl_cmd();
     cmd.args(["-j", "clients"]);
     let out = output_with_timeout(cmd, HELPER_TIMEOUT)?;
     if !out.status.success() {
@@ -162,13 +217,18 @@ fn query_gui_process() -> bool {
     output_with_timeout(cmd, HELPER_TIMEOUT).is_some_and(|o| o.status.success())
 }
 
+/// pkill success policy: 0 = signalled, 1 = nothing matched (fine);
+/// >= 2 (usage/internal error) or signal death = failure.
+fn pkill_ok(status: ExitStatus) -> bool {
+    status.code().is_some_and(|c| c <= 1)
+}
+
 /// pkill narvi-gui with `sig` ("-TERM"/"-KILL"); false on spawn/timeout
-/// or pkill error. Exit 1 (nothing matched) counts as success.
+/// or pkill error.
 fn pkill_gui(sig: &str) -> bool {
     let mut cmd = std::process::Command::new("pkill");
     cmd.arg(sig).args(gui_match_args(&uid_string()));
-    output_with_timeout(cmd, HELPER_TIMEOUT)
-        .is_some_and(|o| o.status.code().is_some_and(|c| c <= 1))
+    output_with_timeout(cmd, HELPER_TIMEOUT).is_some_and(|o| pkill_ok(o.status))
 }
 
 /// Owns the spawned GUI child and runs toggles on a worker thread, so
@@ -187,9 +247,10 @@ impl GuiToggler {
                 false
             }
             Some(Err(e)) => {
+                // Transient waitpid error: keep the handle and assume
+                // alive; dropping it would leave a live GUI unmanaged.
                 log::warn!("gui child wait failed: {e}");
-                self.child = None;
-                false
+                true
             }
             None => false,
         }
@@ -203,14 +264,23 @@ impl GuiToggler {
     }
 
     /// Graceful close via Hyprland; bounded reap keeps SIGKILL authority
-    /// over our child even if it hangs after its window closes.
+    /// over our child if it hangs after its own window closed.
     fn close_window(&mut self) {
-        let mut cmd = std::process::Command::new("hyprctl");
+        let mut cmd = hyprctl_cmd();
         cmd.args(["dispatch", "closewindow", "class:^(narvi-gui)$"]);
         match output_with_timeout(cmd, HELPER_TIMEOUT) {
             Some(o) if o.status.success() => {
                 if let Some(c) = self.child.take() {
-                    std::thread::spawn(move || reap_or_kill(c, CLOSE_GRACE));
+                    std::thread::spawn(move || {
+                        if let Err(mut c) = reap_within(c, CLOSE_GRACE) {
+                            // SIGKILL only once no window remains; else
+                            // just reap whenever the child exits.
+                            if close_should_kill(query_gui_window()) {
+                                let _ = c.kill();
+                            }
+                            let _ = c.wait();
+                        }
+                    });
                 }
             }
             Some(o) => log::warn!("gui close failed: {}", o.status),
@@ -611,6 +681,77 @@ mod tests {
             .unwrap();
         let st = reap_or_kill(child, Duration::from_millis(100)).unwrap();
         assert_eq!(st.signal(), Some(libc::SIGKILL));
+    }
+
+    #[test]
+    fn pkill_exit_code_policy() {
+        // Raw wait status: exit code c is c << 8; a bare signal number
+        // means signal death (code() == None).
+        assert!(pkill_ok(ExitStatus::from_raw(0))); // signalled a match
+        assert!(pkill_ok(ExitStatus::from_raw(1 << 8))); // nothing matched
+        assert!(!pkill_ok(ExitStatus::from_raw(2 << 8))); // usage error
+        assert!(!pkill_ok(ExitStatus::from_raw(3 << 8))); // internal error
+        assert!(!pkill_ok(ExitStatus::from_raw(libc::SIGTERM))); // signal death
+    }
+
+    #[test]
+    fn close_kill_needs_confirmed_window_absence() {
+        assert!(close_should_kill(Some(false)));
+        // A surviving window may be the child's own; never SIGKILL it.
+        assert!(!close_should_kill(Some(true)));
+        // hyprctl failure: unknown state, don't kill.
+        assert!(!close_should_kill(None));
+    }
+
+    #[test]
+    fn reap_within_returns_live_child_on_timeout() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        match reap_within(child, Duration::from_millis(50)) {
+            Err(c) => {
+                let _ = term_and_reap(c);
+            }
+            Ok(st) => panic!("sleep exited unexpectedly: {st:?}"),
+        }
+    }
+
+    #[test]
+    fn reap_within_reaps_exited_child() {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let st = reap_within(child, Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("true did not exit"));
+        assert!(st.success());
+    }
+
+    #[test]
+    fn newest_instance_sig_picks_latest_dir() {
+        let base = std::env::temp_dir().join(format!("narvi-his-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(newest_instance_sig(&base), None); // missing dir
+        std::fs::create_dir_all(&base).unwrap();
+        assert_eq!(newest_instance_sig(&base), None); // empty dir
+        std::fs::create_dir(base.join("older")).unwrap();
+        std::thread::sleep(Duration::from_millis(20)); // distinct mtimes
+        std::fs::create_dir(base.join("newer")).unwrap();
+        std::fs::write(base.join("file"), b"x").unwrap(); // files ignored
+        assert_eq!(
+            newest_instance_sig(&base),
+            Some(std::ffi::OsString::from("newer"))
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn output_wall_time_bounded_with_pipe_holding_grandchild() {
+        // Child exits at once but a grandchild inherits the stdout write
+        // end: total wait must stay ~timeout, not 2x.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 2 & exit 0"]);
+        let t0 = Instant::now();
+        assert!(output_with_timeout(cmd, Duration::from_millis(400)).is_none());
+        assert!(t0.elapsed() < Duration::from_millis(1200));
     }
 
     #[test]
