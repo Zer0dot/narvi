@@ -180,9 +180,13 @@ async fn main() -> Result<()> {
     // Subscribe loop: mirror daemon state into the tray (menu checkmarks, icon).
     let rt = tokio::runtime::Handle::current();
     let sub = std::thread::spawn(move || {
+        let mut spawner =
+            narvi_core::spawn::DaemonSpawner::new("narvid", narvi_core::spawn::SPAWN_COOLDOWN);
         loop {
             let Ok(path) = socket_path() else { return };
             let Ok(mut client) = Client::connect(&path) else {
+                // Unreachable daemon: try to auto-start it (rate-limited).
+                spawner.tick();
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 continue;
             };

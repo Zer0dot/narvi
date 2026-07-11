@@ -1,11 +1,13 @@
 //! Daemon link: a command thread (fire commands) + a subscribe thread (events in).
-//! Both reconnect with backoff so the GUI survives daemon restarts.
+//! Both reconnect with backoff so the GUI survives daemon restarts; the
+//! subscribe thread also auto-spawns `narvid` when it is unreachable.
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use narvi_core::proto::{Command, Status};
+use narvi_core::spawn::{DaemonSpawner, SPAWN_COOLDOWN};
 use narvi_core::{Client, socket_path};
 
 #[derive(Default)]
@@ -77,10 +79,17 @@ fn command_loop(
 }
 
 fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
+    let mut spawner = DaemonSpawner::new("narvid", SPAWN_COOLDOWN);
     loop {
         let client = socket_path().ok().and_then(|p| Client::connect(&p).ok());
         let Some(mut client) = client else {
-            set_error(&shared, Some("daemon unreachable — start narvid".into()));
+            // Unreachable daemon: try to auto-start it (rate-limited).
+            let msg = if spawner.tick() {
+                "starting daemon..."
+            } else {
+                "daemon unreachable — start narvid"
+            };
+            set_error(&shared, Some(msg.into()));
             ctx.request_repaint();
             std::thread::sleep(Duration::from_secs(2));
             continue;
