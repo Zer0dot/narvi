@@ -78,18 +78,22 @@ fn command_loop(
     }
 }
 
+/// User-facing message for an unreachable daemon, per spawner status.
+fn spawn_message(status: SpawnStatus) -> &'static str {
+    match status {
+        SpawnStatus::Starting | SpawnStatus::Scheduled => "starting daemon...",
+        SpawnStatus::GaveUp => "daemon keeps failing — run narvid manually",
+        SpawnStatus::Disabled => "daemon unreachable — start narvid",
+    }
+}
+
 fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
     let mut spawner = DaemonSpawner::new("narvid", SPAWN_COOLDOWN);
     loop {
         let client = socket_path().ok().and_then(|p| Client::connect(&p).ok());
         let Some(mut client) = client else {
             // Unreachable daemon: auto-start it (graced + rate-limited).
-            let msg = match spawner.tick() {
-                SpawnStatus::Starting | SpawnStatus::Scheduled => "starting daemon...",
-                SpawnStatus::GaveUp => "daemon keeps failing — run narvid manually",
-                SpawnStatus::Disabled => "daemon unreachable — start narvid",
-            };
-            set_error(&shared, Some(msg.into()));
+            set_error(&shared, Some(spawn_message(spawner.tick()).into()));
             ctx.request_repaint();
             std::thread::sleep(Duration::from_secs(2));
             continue;
@@ -116,6 +120,10 @@ fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
         match init {
             Ok((st, names)) => update(&shared, st, Some(names)),
             Err(_) => {
+                // Connected but got no answer (request timeout / hiccup):
+                // surface it instead of leaving a stale "connected" UI.
+                set_error(&shared, Some("daemon not responding".into()));
+                ctx.request_repaint();
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
@@ -130,5 +138,24 @@ fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
                 .and_then(|v| serde_json::from_value(v).ok());
             update(&shared, ev.data, names);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_message_covers_every_status() {
+        assert_eq!(spawn_message(SpawnStatus::Starting), "starting daemon...");
+        assert_eq!(spawn_message(SpawnStatus::Scheduled), "starting daemon...");
+        assert_eq!(
+            spawn_message(SpawnStatus::GaveUp),
+            "daemon keeps failing — run narvid manually"
+        );
+        assert_eq!(
+            spawn_message(SpawnStatus::Disabled),
+            "daemon unreachable — start narvid"
+        );
     }
 }
