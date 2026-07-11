@@ -70,9 +70,10 @@ in
       Service = {
         ExecStart = "${cfg.package}/bin/narvi-tray";
         # Tray spawns narvi-gui/hyprctl/pgrep/pkill by name; systemd's
-        # minimal user PATH may lack them.
+        # minimal user PATH may lack them. Keep the stock FHS dirs so
+        # hyprctl resolves on non-NixOS home-manager too.
         Environment = [
-          "PATH=${lib.makeBinPath [ cfg.package pkgs.procps ]}:${config.home.profileDirectory}/bin:/run/current-system/sw/bin"
+          "PATH=${lib.makeBinPath [ cfg.package pkgs.procps ]}:${config.home.profileDirectory}/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
         ];
         Restart = "on-failure";
         RestartSec = 2;
