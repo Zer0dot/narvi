@@ -1,14 +1,20 @@
 //! Auto-spawn of `narvid` when the daemon socket is unreachable.
 //!
-//! `SpawnGuard` rate-limits attempts (no spawn storm from a broken binary);
-//! `DaemonSpawner` owns the child and reaps it via `try_wait` (no zombies).
-//! `narvid` itself refuses to double-run, so spawning is always safe.
+//! `DaemonSpawner` waits out a grace window first (so a daemon already
+//! starting — e.g. under systemd — can win), rate-limits attempts via
+//! `SpawnGuard`, kills a child stuck starting past a deadline, and reaps
+//! exits. Single-instance safety comes from `narvid`'s exclusive file
+//! lock: a losing duplicate exits before touching any state.
 
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 /// Default wait between daemon spawn attempts.
 pub const SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
+/// Unreachable streak required before the first spawn attempt.
+pub const SPAWN_GRACE: Duration = Duration::from_secs(5);
+/// Max time a spawned child may stay unconnectable before it is killed.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Rate limiter for spawn attempts: at most one per cooldown window.
 #[derive(Debug)]
@@ -32,10 +38,10 @@ impl SpawnGuard {
 
     /// Clock-injected variant of [`Self::try_acquire`] for tests.
     pub fn try_acquire_at(&mut self, now: Instant) -> bool {
-        if let Some(last) = self.last_attempt {
-            if now.saturating_duration_since(last) < self.cooldown {
-                return false; // blocked; window keeps counting from `last`
-            }
+        if let Some(last) = self.last_attempt
+            && now.saturating_duration_since(last) < self.cooldown
+        {
+            return false; // blocked; window keeps counting from `last`
         }
         self.last_attempt = Some(now);
         true
@@ -45,27 +51,66 @@ impl SpawnGuard {
 /// Spawns a daemon binary (found via PATH) at most once per cooldown.
 pub struct DaemonSpawner {
     program: String,
+    args: Vec<String>,
     guard: SpawnGuard,
-    child: Option<Child>,
+    grace: Duration,
+    startup_timeout: Duration,
+    /// Start of the current unreachable streak; grace counts from here.
+    first_tick: Option<Instant>,
+    child: Option<(Child, Instant)>,
 }
 
 impl DaemonSpawner {
     pub fn new(program: impl Into<String>, cooldown: Duration) -> Self {
         Self {
             program: program.into(),
+            args: Vec::new(),
             guard: SpawnGuard::new(cooldown),
+            grace: SPAWN_GRACE,
+            startup_timeout: STARTUP_TIMEOUT,
+            first_tick: None,
             child: None,
         }
     }
 
+    /// Call after a successful connect: the next outage gets a fresh grace,
+    /// so a supervisor (systemd restart) can win the respawn race.
+    pub fn reset(&mut self) {
+        self.first_tick = None;
+    }
+
     /// Call on each unreachable-daemon retry: reaps a finished child, then
-    /// spawns a new one if the cooldown allows. True while a spawn is pending.
+    /// spawns a new one if grace has passed and the cooldown allows.
+    /// True while a spawn is pending (child alive, within startup timeout).
     pub fn tick(&mut self) -> bool {
-        if let Some(child) = self.child.as_mut() {
+        self.tick_at(Instant::now())
+    }
+
+    /// Clock-injected variant of [`Self::tick`] for tests.
+    pub fn tick_at(&mut self, now: Instant) -> bool {
+        if let Some((child, started)) = self.child.as_mut() {
             match child.try_wait() {
-                Ok(None) => return true, // still starting up
+                Ok(None) => {
+                    if now.saturating_duration_since(*started) < self.startup_timeout {
+                        return true; // still starting up
+                    }
+                    // Stuck before becoming connectable: kill so the next
+                    // cooldown window can retry instead of pending forever.
+                    log::warn!("spawned {} stuck starting; killing it", self.program);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    self.child = None;
+                    return false;
+                }
                 Ok(Some(status)) => {
-                    log::info!("spawned {} exited: {status}", self.program);
+                    if status.success() {
+                        log::info!("spawned {} exited: {status}", self.program);
+                    } else {
+                        log::warn!(
+                            "spawned {} exited: {status} — run it manually to see why",
+                            self.program
+                        );
+                    }
                     self.child = None;
                 }
                 Err(e) => {
@@ -74,13 +119,18 @@ impl DaemonSpawner {
                 }
             }
         }
-        if !self.guard.try_acquire() {
+        // Grace: give an already-starting daemon time to bind its socket.
+        let first = *self.first_tick.get_or_insert(now);
+        if now.saturating_duration_since(first) < self.grace {
             return false;
         }
-        match Command::new(&self.program).spawn() {
+        if !self.guard.try_acquire_at(now) {
+            return false;
+        }
+        match Command::new(&self.program).args(&self.args).spawn() {
             Ok(child) => {
                 log::info!("spawned {}", self.program);
-                self.child = Some(child);
+                self.child = Some((child, now));
                 true
             }
             Err(e) => {
@@ -91,9 +141,39 @@ impl DaemonSpawner {
     }
 }
 
+// A spawned child intentionally outlives the spawner: it is the daemon.
+// If it exits later, init reaps it; while the client lives, tick() reaps.
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ZERO: Duration = Duration::ZERO;
+
+    fn spawner(
+        program: &str,
+        args: &[&str],
+        cooldown: Duration,
+        grace: Duration,
+        startup_timeout: Duration,
+    ) -> DaemonSpawner {
+        DaemonSpawner {
+            program: program.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            guard: SpawnGuard::new(cooldown),
+            grace,
+            startup_timeout,
+            first_tick: None,
+            child: None,
+        }
+    }
+
+    fn kill(s: &mut DaemonSpawner) {
+        if let Some((mut c, _)) = s.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
 
     #[test]
     fn guard_allows_first_attempt() {
@@ -130,16 +210,78 @@ mod tests {
 
     #[test]
     fn spawner_missing_binary_not_pending_and_cooldown_holds() {
-        let mut s = DaemonSpawner::new("narvi-no-such-binary-xyz", Duration::from_secs(60));
-        assert!(!s.tick()); // spawn fails
-        assert!(!s.tick()); // failed attempt still consumed the window
+        let mut s = spawner(
+            "narvi-no-such-binary-xyz",
+            &[],
+            Duration::from_secs(60),
+            ZERO,
+            ZERO,
+        );
+        let t0 = Instant::now();
+        assert!(!s.tick_at(t0)); // spawn fails
+        assert!(!s.tick_at(t0)); // failed attempt still consumed the window
+    }
+
+    #[test]
+    fn spawner_grace_defers_first_spawn() {
+        let grace = Duration::from_secs(5);
+        let mut s = spawner("sleep", &["30"], Duration::from_secs(60), grace, grace);
+        let t0 = Instant::now();
+        assert!(!s.tick_at(t0));
+        assert!(s.child.is_none()); // grace blocks, nothing spawned
+        assert!(!s.tick_at(t0 + Duration::from_secs(4)));
+        assert!(s.tick_at(t0 + grace));
+        assert!(s.child.is_some());
+        kill(&mut s);
+    }
+
+    #[test]
+    fn spawner_alive_child_pends_without_consuming_cooldown() {
+        let timeout = Duration::from_secs(10);
+        let mut s = spawner("sleep", &["30"], Duration::from_secs(60), ZERO, timeout);
+        let t0 = Instant::now();
+        assert!(s.tick_at(t0));
+        let pid = s.child.as_ref().map(|(c, _)| c.id());
+        let last = s.guard.last_attempt;
+        assert!(s.tick_at(t0 + Duration::from_secs(1))); // alive branch
+        assert_eq!(s.child.as_ref().map(|(c, _)| c.id()), pid); // no respawn
+        assert_eq!(s.guard.last_attempt, last); // window untouched
+        kill(&mut s);
+    }
+
+    #[test]
+    fn spawner_kills_child_stuck_past_startup_timeout() {
+        let timeout = Duration::from_secs(10);
+        let cooldown = Duration::from_secs(60);
+        let mut s = spawner("sleep", &["30"], cooldown, ZERO, timeout);
+        let t0 = Instant::now();
+        assert!(s.tick_at(t0));
+        assert!(!s.tick_at(t0 + timeout)); // stuck: killed, no longer pending
+        assert!(s.child.is_none());
+        assert!(!s.tick_at(t0 + timeout)); // cooldown still holds
+        assert!(s.tick_at(t0 + cooldown)); // then a fresh attempt is allowed
+        kill(&mut s);
+    }
+
+    #[test]
+    fn spawner_reset_rearms_grace() {
+        let grace = Duration::from_secs(5);
+        let mut s = spawner("sleep", &["30"], ZERO, grace, grace);
+        let t0 = Instant::now();
+        assert!(!s.tick_at(t0));
+        s.reset(); // as after a successful connect
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(!s.tick_at(t1)); // grace counts from the new streak
+        assert!(s.tick_at(t1 + grace));
+        kill(&mut s);
     }
 
     #[test]
     fn spawner_reaps_exited_child() {
         // `true` exits immediately; large cooldown blocks a respawn, so tick
         // must flip pending -> false once the child is reaped.
-        let mut s = DaemonSpawner::new("true", Duration::from_secs(60));
+        let big = Duration::from_secs(60);
+        let mut s = spawner("true", &[], big, ZERO, big);
         assert!(s.tick());
         let deadline = Instant::now() + Duration::from_secs(5);
         while s.tick() {

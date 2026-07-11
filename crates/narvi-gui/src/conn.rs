@@ -83,7 +83,7 @@ fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
     loop {
         let client = socket_path().ok().and_then(|p| Client::connect(&p).ok());
         let Some(mut client) = client else {
-            // Unreachable daemon: try to auto-start it (rate-limited).
+            // Unreachable daemon: auto-start it (graced + rate-limited).
             let msg = if spawner.tick() {
                 "starting daemon..."
             } else {
@@ -94,6 +94,7 @@ fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
             std::thread::sleep(Duration::from_secs(2));
             continue;
         };
+        spawner.reset(); // fresh grace for the next outage
 
         let update = |shared: &Arc<Mutex<Shared>>, st: Status, profiles: Option<Vec<String>>| {
             if let Ok(mut s) = shared.lock() {
