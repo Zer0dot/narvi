@@ -14,7 +14,8 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/zer0dot/narvi"
 authors = ["zer0dot <zer0dot.dev@gmail.com>"]
-rust-version = "1.85"
+# 1.89: std file locks for narvid's single-instance flock.
+rust-version = "1.89"
 
 [workspace.dependencies]
 narvi-core = { path = "crates/narvi-core" }

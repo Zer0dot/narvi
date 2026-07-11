@@ -19,6 +19,19 @@ use state::Daemon;
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Single-instance guard first: a losing duplicate must exit before it
+    // touches the shader or config. Exit 0 — desired state already holds
+    // (auto-spawners race systemd here; a failure exit would trip Restart=).
+    let sock = narvi_core::socket_path()?;
+    let Some(_lock) = server::try_lock(&sock.with_extension("lock"))? else {
+        log::info!("narvid already running; exiting");
+        return Ok(());
+    };
+    // Bind early so clients can connect (and stop auto-spawning) while the
+    // initial config load / apply below is still running.
+    let listener = server::bind(&sock).await?;
+    log::info!("listening on {}", sock.display());
+
     let cfg_path = match std::env::var_os("NARVI_CONFIG") {
         Some(p) => p.into(),
         None => Config::default_path()?,
@@ -48,9 +61,6 @@ async fn main() -> Result<()> {
         daemon.enabled
     );
 
-    let sock = narvi_core::socket_path()?;
-    let listener = server::bind(&sock).await?;
-    log::info!("listening on {}", sock.display());
     let cfg_path = daemon.cfg_path.clone();
     let daemon = Arc::new(Mutex::new(daemon));
     sched::spawn(daemon.clone());

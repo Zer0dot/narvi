@@ -11,7 +11,29 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::state::Daemon;
 
-/// Bind the listener, refusing to clobber a live daemon's socket.
+/// Take the exclusive daemon lock (flock); `None` = another narvid has it.
+/// Held for the process lifetime, it makes stale-socket cleanup race-free.
+pub fn try_lock(path: &std::path::Path) -> Result<Option<std::fs::File>> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("lock {}", path.display()))
+        }
+    }
+}
+
+/// Bind the listener. Caller holds the instance lock, so an existing socket
+/// file is stale by definition; the connect probe is defense in depth.
 pub async fn bind(path: &std::path::Path) -> Result<UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -94,5 +116,22 @@ async fn recv(
     match rx {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_lock;
+
+    #[test]
+    fn lock_is_exclusive_until_released() {
+        let path = std::env::temp_dir().join(format!("narvid-test-{}.lock", std::process::id()));
+        let first = try_lock(&path).unwrap();
+        assert!(first.is_some());
+        // Second open file description must be refused while the first lives.
+        assert!(try_lock(&path).unwrap().is_none());
+        drop(first);
+        assert!(try_lock(&path).unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
     }
 }
