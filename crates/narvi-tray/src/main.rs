@@ -13,6 +13,48 @@ struct NarviTray {
     active: Option<String>,
     enabled: bool,
     cmd: mpsc::Sender<Command>,
+    /// Our spawned GUI process; kept so exits are reaped (no zombies).
+    gui_child: Option<std::process::Child>,
+}
+
+/// What a tray click should do to the GUI.
+#[derive(Debug, PartialEq, Eq)]
+enum GuiAction {
+    Close,
+    Spawn,
+}
+
+/// Toggle on window presence; fall back to child liveness if unknown.
+fn gui_action(window: Option<bool>, child_alive: bool) -> GuiAction {
+    match window {
+        Some(true) => GuiAction::Close,
+        Some(false) => GuiAction::Spawn,
+        None if child_alive => GuiAction::Close,
+        None => GuiAction::Spawn,
+    }
+}
+
+/// Parse `hyprctl -j clients` JSON; Some(has narvi-gui window) or None if malformed.
+fn has_gui_window(clients_json: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(clients_json).ok()?;
+    let clients = v.as_array()?;
+    Some(
+        clients
+            .iter()
+            .any(|c| c.get("class").and_then(serde_json::Value::as_str) == Some("narvi-gui")),
+    )
+}
+
+/// Ask Hyprland whether a narvi-gui window exists; None if hyprctl fails.
+fn query_gui_window() -> Option<bool> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["-j", "clients"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    has_gui_window(&String::from_utf8_lossy(&out.stdout))
 }
 
 impl NarviTray {
@@ -22,24 +64,56 @@ impl NarviTray {
             log::warn!("command worker gone");
         }
     }
-}
 
-/// Show the GUI if it isn't running, otherwise close it.
-fn toggle_gui() {
-    let running = std::process::Command::new("pgrep")
-        .args(["-x", "narvi-gui"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let result = if running {
-        std::process::Command::new("pkill")
-            .args(["-x", "narvi-gui"])
-            .spawn()
-    } else {
-        std::process::Command::new("narvi-gui").spawn()
-    };
-    if let Err(e) = result {
-        log::warn!("gui toggle failed: {e}");
+    /// Reap-aware liveness of our spawned GUI child; drops finished handles.
+    fn gui_child_alive(&mut self) -> bool {
+        match self.gui_child.as_mut().map(std::process::Child::try_wait) {
+            Some(Ok(None)) => true,
+            Some(Ok(Some(_))) => {
+                self.gui_child = None;
+                false
+            }
+            Some(Err(e)) => {
+                log::warn!("gui child wait failed: {e}");
+                self.gui_child = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Kill + reap any lingering GUI child before a fresh spawn.
+    fn kill_gui_child(&mut self) {
+        if let Some(mut c) = self.gui_child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    /// Show the GUI if no window is open, otherwise close it.
+    fn toggle_gui(&mut self) {
+        let window = query_gui_window();
+        let alive = self.gui_child_alive();
+        match gui_action(window, alive) {
+            GuiAction::Close if window == Some(true) => {
+                match std::process::Command::new("hyprctl")
+                    .args(["dispatch", "closewindow", "class:^(narvi-gui)$"])
+                    .output()
+                {
+                    Ok(o) if !o.status.success() => log::warn!("gui close failed: {}", o.status),
+                    Err(e) => log::warn!("gui close failed: {e}"),
+                    Ok(_) => {}
+                }
+            }
+            GuiAction::Close => self.kill_gui_child(),
+            GuiAction::Spawn => {
+                self.kill_gui_child();
+                match std::process::Command::new("narvi-gui").spawn() {
+                    Ok(child) => self.gui_child = Some(child),
+                    Err(e) => log::warn!("gui spawn failed: {e}"),
+                }
+            }
+        }
     }
 }
 
@@ -57,7 +131,7 @@ impl ksni::Tray for NarviTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        toggle_gui();
+        self.toggle_gui();
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -174,6 +248,7 @@ async fn main() -> Result<()> {
         active: None,
         enabled: true,
         cmd: cmd_tx,
+        gui_child: None,
     };
     let handle = tray.spawn().await?;
 
@@ -234,4 +309,48 @@ async fn main() -> Result<()> {
     // Exits with the process on Quit; otherwise idles with the subscriber.
     let _ = tokio::task::spawn_blocking(move || sub.join()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_present() {
+        let json = r#"[{"class":"firefox","title":"x"},{"class":"narvi-gui","title":"narvi-gui"}]"#;
+        assert_eq!(has_gui_window(json), Some(true));
+    }
+
+    #[test]
+    fn window_absent() {
+        assert_eq!(has_gui_window(r#"[{"class":"firefox"}]"#), Some(false));
+        assert_eq!(has_gui_window("[]"), Some(false));
+        // Missing/non-string class fields are skipped, not matched.
+        assert_eq!(
+            has_gui_window(r#"[{"title":"x"},{"class":42}]"#),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn window_malformed() {
+        assert_eq!(has_gui_window("not json"), None);
+        assert_eq!(has_gui_window(r#"{"class":"narvi-gui"}"#), None); // not an array
+        assert_eq!(has_gui_window(""), None);
+    }
+
+    #[test]
+    fn action_follows_window_presence() {
+        // Window state wins regardless of child liveness (zombie-proof).
+        assert_eq!(gui_action(Some(true), false), GuiAction::Close);
+        assert_eq!(gui_action(Some(true), true), GuiAction::Close);
+        assert_eq!(gui_action(Some(false), true), GuiAction::Spawn);
+        assert_eq!(gui_action(Some(false), false), GuiAction::Spawn);
+    }
+
+    #[test]
+    fn action_falls_back_to_child_liveness() {
+        assert_eq!(gui_action(None, true), GuiAction::Close);
+        assert_eq!(gui_action(None, false), GuiAction::Spawn);
+    }
 }
