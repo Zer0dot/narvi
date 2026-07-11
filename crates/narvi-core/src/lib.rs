@@ -13,6 +13,7 @@ pub mod pipeline;
 pub mod profile;
 pub mod proto;
 pub mod shader;
+pub mod spawn;
 
 pub use client::{Client, socket_path};
 pub use config::Config;
