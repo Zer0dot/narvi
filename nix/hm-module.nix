@@ -69,6 +69,11 @@ in
       };
       Service = {
         ExecStart = "${cfg.package}/bin/narvi-tray";
+        # Tray spawns narvi-gui/hyprctl/pgrep/pkill by name; systemd's
+        # minimal user PATH may lack them.
+        Environment = [
+          "PATH=${lib.makeBinPath [ cfg.package pkgs.procps ]}:${config.home.profileDirectory}/bin:/run/current-system/sw/bin"
+        ];
         Restart = "on-failure";
         RestartSec = 2;
       };
