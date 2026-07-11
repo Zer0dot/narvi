@@ -20,8 +20,7 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Single-instance guard first: a losing duplicate must exit before it
-    // touches the shader or config. Exit 0 — desired state already holds
-    // (auto-spawners race systemd here; a failure exit would trip Restart=).
+    // touches the shader or config. Exit 0 so Restart= is not tripped.
     let sock = narvi_core::socket_path()?;
     let Some(_lock) = server::try_lock(&sock.with_extension("lock"))? else {
         log::info!("narvid already running; exiting");
