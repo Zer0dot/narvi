@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use narvi_core::proto::{Command, Status};
-use narvi_core::spawn::{DaemonSpawner, SPAWN_COOLDOWN};
+use narvi_core::spawn::{DaemonSpawner, SPAWN_COOLDOWN, SpawnStatus};
 use narvi_core::{Client, socket_path};
 
 #[derive(Default)]
@@ -84,10 +84,10 @@ fn subscribe_loop(shared: Arc<Mutex<Shared>>, ctx: eframe::egui::Context) {
         let client = socket_path().ok().and_then(|p| Client::connect(&p).ok());
         let Some(mut client) = client else {
             // Unreachable daemon: auto-start it (graced + rate-limited).
-            let msg = if spawner.tick() {
-                "starting daemon..."
-            } else {
-                "daemon unreachable — start narvid"
+            let msg = match spawner.tick() {
+                SpawnStatus::Starting | SpawnStatus::Scheduled => "starting daemon...",
+                SpawnStatus::GaveUp => "daemon keeps failing — run narvid manually",
+                SpawnStatus::Disabled => "daemon unreachable — start narvid",
             };
             set_error(&shared, Some(msg.into()));
             ctx.request_repaint();
