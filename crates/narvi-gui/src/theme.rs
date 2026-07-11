@@ -30,16 +30,16 @@ pub fn apply(ctx: &egui::Context) {
     v.override_text_color = Some(TEXT);
     v.hyperlink_color = ACCENT;
     v.selection.bg_fill = ACCENT.linear_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
     v.widgets.inactive.bg_fill = CARD;
     v.widgets.inactive.weak_bg_fill = CARD;
     v.widgets.hovered.bg_fill = CARD;
     v.widgets.hovered.weak_bg_fill = CARD;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
     v.widgets.active.bg_fill = CARD;
     v.widgets.active.weak_bg_fill = CARD;
-    v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT_GLOW);
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT_GLOW);
     ctx.set_visuals(v);
 
     // Monospace throughout.
@@ -76,7 +76,7 @@ pub fn tracked(s: &str) -> String {
 /// Bracket corners `⌜ ⌝ ⌞ ⌟` drawn at the four corners of `rect`.
 pub fn bracket_corners(painter: &egui::Painter, rect: Rect, color: Color32) {
     let len = 10.0;
-    let s = Stroke::new(1.5, color);
+    let s = Stroke::new(1.5_f32, color);
     let c = [
         (rect.left_top(), Vec2::X, Vec2::Y),
         (rect.right_top(), -Vec2::X, Vec2::Y),
@@ -112,7 +112,7 @@ pub fn background_flourish(painter: &egui::Painter, rect: Rect, accent: Color32)
         let a = i as f32 / 72.0 * std::f32::consts::TAU;
         let p = Pos2::new(center.x + rx * a.cos(), center.y + ry * a.sin() + 40.0);
         if let Some(q) = prev {
-            painter.line_segment([q, p], Stroke::new(1.0, ring));
+            painter.line_segment([q, p], Stroke::new(1.0_f32, ring));
         }
         prev = Some(p);
     }
