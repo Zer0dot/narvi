@@ -27,6 +27,15 @@ narvi toggle                      # shader on/off
 narvi-gui                         # dashboard
 ```
 
+`narvi-gui` and `narvi-tray` auto-start `narvid` if the daemon stays unreachable
+for a few seconds (rate-limited; gives up after repeated failures); the `narvi`
+CLI never does. When the `narvi.service` systemd user unit exists they start it
+via `systemctl --user start` so the daemon stays supervised; otherwise they exec
+`narvid` detached. Set `NARVI_AUTOSPAWN=0` to opt out (e.g. so
+`systemctl --user stop narvi` sticks); home-manager users can set
+`programs.narvi.autospawn = false` instead. A file lock next to the socket
+guarantees a single daemon instance either way.
+
 ## Configuration (TOML)
 
 `~/.config/narvi/config.toml` — seeded with presets on first run (Default, Gaming,

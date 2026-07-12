@@ -27,6 +27,16 @@ in
       description = "Autostart the tray with the daemon.";
     };
 
+    autospawn = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Let the tray and GUI auto-start narvid when it is unreachable.
+        Disable (sets NARVI_AUTOSPAWN=0) so `systemctl --user stop narvi`
+        sticks instead of being undone by a running tray or GUI.
+      '';
+    };
+
     hyprlandKeybinds = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -64,23 +74,33 @@ in
     systemd.user.services.narvi-tray = lib.mkIf (cfg.service.enable && cfg.tray.enable) {
       Unit = {
         Description = "Narvi tray";
-        After = [ "narvi.service" ];
+        # No After=narvi.service: sessions ordering graphical-session.target
+        # after its wanted units would cycle and DROP the daemon's start job
+        # (observed live). Autospawn covers tray-before-daemon races anyway.
         PartOf = [ "graphical-session.target" ];
       };
       Service = {
         ExecStart = "${cfg.package}/bin/narvi-tray";
         Restart = "on-failure";
         RestartSec = 2;
+      } // lib.optionalAttrs (!cfg.autospawn) {
+        # Propagates to the GUI the tray launches.
+        Environment = [ "NARVI_AUTOSPAWN=0" ];
       };
       Install.WantedBy = [ "graphical-session.target" ];
     };
 
-    wayland.windowManager.hyprland.settings.bind = lib.mkIf cfg.hyprlandKeybinds [
-      "SUPER SHIFT, N, exec, ${cfg.package}/bin/narvi toggle"
-      "SUPER SHIFT, V, exec, ${cfg.package}/bin/narvi nudge vibrance +0.05"
-      "SUPER SHIFT, B, exec, ${cfg.package}/bin/narvi nudge vibrance -0.05"
-      "SUPER SHIFT, M, exec, ${cfg.package}/bin/narvi profile next"
-      "SUPER SHIFT, G, exec, ${cfg.package}/bin/narvi gui"
-    ];
+    wayland.windowManager.hyprland.settings.bind =
+      let
+        # `narvi gui` spawns narvi-gui, which inherits this environment.
+        gui = lib.optionalString (!cfg.autospawn) "env NARVI_AUTOSPAWN=0 ";
+      in
+      lib.mkIf cfg.hyprlandKeybinds [
+        "SUPER SHIFT, N, exec, ${cfg.package}/bin/narvi toggle"
+        "SUPER SHIFT, V, exec, ${cfg.package}/bin/narvi nudge vibrance +0.05"
+        "SUPER SHIFT, B, exec, ${cfg.package}/bin/narvi nudge vibrance -0.05"
+        "SUPER SHIFT, M, exec, ${cfg.package}/bin/narvi profile next"
+        "SUPER SHIFT, G, exec, ${gui}${cfg.package}/bin/narvi gui"
+      ];
   };
 }

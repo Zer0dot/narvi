@@ -19,6 +19,13 @@ use state::Daemon;
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Single-instance guard first: a losing duplicate must exit before it
+    // touches the shader or config. Exit 0 so Restart= is not tripped.
+    let sock = narvi_core::socket_path()?;
+    let Some(_lock) = server::try_lock(&sock.with_extension("lock"))? else {
+        log::info!("narvid already running; exiting");
+        return Ok(());
+    };
     let cfg_path = match std::env::var_os("NARVI_CONFIG") {
         Some(p) => p.into(),
         None => Config::default_path()?,
@@ -36,6 +43,15 @@ async fn main() -> Result<()> {
         cfg
     };
 
+    // Bind only after config load succeeded (a doomed daemon must not look
+    // reachable), but before the slower restore/apply so clients can
+    // connect — and stop auto-spawning — during startup.
+    let Some(listener) = server::bind(&sock).await? else {
+        log::info!("another daemon owns {}; exiting", sock.display());
+        return Ok(());
+    };
+    log::info!("listening on {}", sock.display());
+
     let mut daemon = Daemon::new(cfg, cfg_path);
     daemon.restore();
     if let Err(e) = daemon.apply().await {
@@ -48,9 +64,6 @@ async fn main() -> Result<()> {
         daemon.enabled
     );
 
-    let sock = narvi_core::socket_path()?;
-    let listener = server::bind(&sock).await?;
-    log::info!("listening on {}", sock.display());
     let cfg_path = daemon.cfg_path.clone();
     let daemon = Arc::new(Mutex::new(daemon));
     sched::spawn(daemon.clone());
