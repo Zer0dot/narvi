@@ -148,9 +148,16 @@ impl DaemonSpawner {
     }
 
     /// Drop detached children that exited; keep live ones for a later sweep.
+    /// Errors (ECHILD: nothing left to reap) drop too, so the list is bounded.
     fn reap_detached(&mut self) {
-        self.detached
-            .retain_mut(|c| matches!(c.try_wait(), Ok(None) | Err(_)));
+        self.detached.retain_mut(|c| match c.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => false,
+            Err(e) => {
+                log::warn!("reap failed; dropping child handle: {e}");
+                false
+            }
+        });
     }
 
     /// Call on each unreachable-daemon retry: reaps a finished child, then
